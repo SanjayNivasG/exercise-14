@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      containers:
+      - name: payment
+        image: python:3.9-slim
+        # Step A: The OTel SDK distro, and bootstrap instrumentation engines
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          pip install flask opentelemetry-distro opentelemetry-exporter-otlp
+          opentelemetry-bootstrap -a install
+          
+          # Step B: Write a standard, clean Flask API app with our 4.2-second bottleneck
+          cat << 'EOF' > app.py
+          from flask import Flask
+          import time
+          app = Flask(__name__)
+          @app.route('/')
+          def payment():
+              time.sleep(4.2) # The Bottleneck
+              return "Payment processed successfully\n"
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0', port=8083)
+          EOF
+          
+          # Step C: Execute application inside the live OTel agent auto-wrapper wrapper
+          opentelemetry-instrument python app.py
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: "payment-service"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://tempo.observability.svc.cluster.local:4317"
+        - name: OTEL_TRACES_EXPORTER
+          value: "otlp"
+        ports:
+        - containerPort: 8083
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inventory-service
+  template:
+    metadata:
+      labels:
+        app: inventory-service
+    spec:
+      containers:
+      - name: inventory
+        image: python:3.9-slim
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          pip install flask requests opentelemetry-distro opentelemetry-exporter-otlp
+          opentelemetry-bootstrap -a install
+          cat << 'EOF' > app.py
+          from flask import Flask
+          import requests
+          import time
+          app = Flask(__name__)
+          @app.route('/')
+          def inventory():
+              time.sleep(0.1)
+              res = requests.get("http://payment-service:8083/")
+              return f"Inventory OK. {res.text}"
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0', port=8082)
+          EOF
+          opentelemetry-instrument python app.py
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: "inventory-service"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://tempo.observability.svc.cluster.local:4317"
+        - name: OTEL_TRACES_EXPORTER
+          value: "otlp"
+        ports:
+        - containerPort: 8082
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: checkout-service
+  template:
+    metadata:
+      labels:
+        app: checkout-service
+    spec:
+      containers:
+      - name: checkout
+        image: python:3.9-slim
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          pip install flask requests opentelemetry-distro opentelemetry-exporter-otlp
+          opentelemetry-bootstrap -a install
+          cat << 'EOF' > app.py
+          from flask import Flask
+          import requests
+          import time
+          app = Flask(__name__)
+          @app.route('/')
+          def checkout():
+              start = time.time()
+              time.sleep(0.5)
+              res = requests.get("http://inventory-service:8082/")
+              duration = time.time() - start
+              return f"Checkout Complete! Total Time: {duration:.2f}s\nDetails: {res.text}"
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0', port=8081)
+          EOF
+          opentelemetry-instrument python app.py
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: "checkout-service"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://tempo.observability.svc.cluster.local:4317"
+        - name: OTEL_TRACES_EXPORTER
+          value: "otlp"
+        ports:
+        - containerPort: 8081
